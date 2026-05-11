@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "deal_triage": "./src/ac_deal_triage/graph.py:graph"
+  },
+  "env": "../.env"
+}

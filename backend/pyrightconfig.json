@@ -1,0 +1,7 @@
+{
+  "include": ["src"],
+  "exclude": ["**/__pycache__", "**/.venv", "**/.langgraph_api"],
+  "extraPaths": ["src"],
+  "pythonVersion": "3.11",
+  "reportMissingImports": "warning"
+}
