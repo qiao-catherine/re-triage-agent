@@ -1,4 +1,4 @@
-# AC GTM Take-Home: Real Estate Deal Triage Agent
+# Real Estate Deal Triage Agent
 
 A real-estate-fund deal-triage demo built for the Applied Compute GTM
 take-home. Inbound memo → triage agent (3 tools) → human review →
