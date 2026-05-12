@@ -42,6 +42,7 @@ export type DealMemoryEntry = {
     cap_rate_pct: number;
     occupancy_pct: number;
     source: string;
+    triage_pod?: string;
   };
   raw_memo: string;
   agent_recommendation: {

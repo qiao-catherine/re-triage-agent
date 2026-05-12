@@ -37,6 +37,14 @@ when present, null only when genuinely not named:
                the brokerage is in the email signature or the From-line
                domain. Use the brokerage name, not the individual agent's.
 
+Also set `triage_pod`. This is the analyst pod the memo routes to, in
+"<Region> / <Class>" form (9 fixed values, see schema). Pick by:
+  - Region from US state: West (CA, OR, WA, NV, AZ, UT, ID, MT, WY, CO,
+    NM, AK, HI); Central (TX, OK, KS, NE, SD, ND, MN, IA, MO, AR, LA, WI,
+    IL, IN, MI, OH, KY, TN); East = everything else.
+  - Class collapses asset_type: "Industrial" iff Industrial, "Multifamily"
+    iff Multifamily, "Other" for any other asset_type.
+
 The response schema is enforced server-side; return values that conform to
 the DealContext pydantic model.
 """

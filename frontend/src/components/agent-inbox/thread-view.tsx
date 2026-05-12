@@ -29,6 +29,8 @@ type SimilarDeal = {
 
 type DealContext = {
   deal_name: string;
+  sponsor?: string | null;
+  broker?: string | null;
   location: { city: string; state: string; zipcode: string };
   asset_type: string;
   size_sqft: number;
@@ -37,6 +39,7 @@ type DealContext = {
   cap_rate_pct: number;
   occupancy_pct: number;
   source: string;
+  triage_pod?: string;
 };
 
 type EntityContext = {
@@ -160,7 +163,7 @@ function RecommendationCard({ reco }: { reco: Recommendation }) {
           : "border-gray-300 bg-gray-50/40"
       }`}
     >
-      <div className="flex items-baseline gap-3">
+      <div className="flex items-baseline gap-3 flex-wrap">
         <div className="text-xs uppercase tracking-wider text-gray-500 font-semibold">
           Recommendation
         </div>
@@ -171,6 +174,11 @@ function RecommendationCard({ reco }: { reco: Recommendation }) {
         >
           {reco.decision}
         </div>
+        {reco.deal?.triage_pod && (
+          <span className="ml-auto inline-flex items-center rounded-md bg-white px-2 py-0.5 text-xs font-medium text-gray-700 ring-1 ring-inset ring-gray-200">
+            Triage: {reco.deal.triage_pod}
+          </span>
+        )}
       </div>
 
       <div className="mt-4 text-sm text-gray-800 leading-relaxed">
@@ -195,7 +203,10 @@ function RecommendationCard({ reco }: { reco: Recommendation }) {
 
 function DealContextRows({ deal }: { deal: DealContext }) {
   const rows: Array<[string, string]> = [
+    ["Analyst triage", deal.triage_pod || "-"],
     ["Property", deal.deal_name],
+    ["Sponsor", deal.sponsor || "-"],
+    ["Broker", deal.broker || "-"],
     ["Location", formatLocation(deal.location)],
     ["Asset type", deal.asset_type],
     ["Size", `${(deal.size_sqft ?? 0).toLocaleString()} sqft`],

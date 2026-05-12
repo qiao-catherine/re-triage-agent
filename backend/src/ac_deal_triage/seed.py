@@ -87,6 +87,34 @@ def _ago(days: int) -> datetime:
     return datetime.now(tz=timezone.utc) - timedelta(days=days)
 
 
+# Triage pod assignment (matches the description in tools.py extraction
+# prompt and DealContext.triage_pod). Used to backfill historical seed deals
+# deterministically; runtime extraction goes through the LLM.
+_WEST_STATES = {
+    "CA", "OR", "WA", "NV", "AZ", "UT", "ID", "MT", "WY", "CO", "NM", "AK", "HI",
+}
+_CENTRAL_STATES = {
+    "TX", "OK", "KS", "NE", "SD", "ND", "MN", "IA", "MO", "AR", "LA",
+    "WI", "IL", "IN", "MI", "OH", "KY", "TN",
+}
+
+
+def _triage_pod(state: str, asset_type: str) -> str:
+    if state in _WEST_STATES:
+        region = "West"
+    elif state in _CENTRAL_STATES:
+        region = "Central"
+    else:
+        region = "East"
+    if asset_type == "Industrial":
+        cls = "Industrial"
+    elif asset_type == "Multifamily":
+        cls = "Multifamily"
+    else:
+        cls = "Other"
+    return f"{region} / {cls}"
+
+
 def _entry(
     memo_id: str,
     deal_name: str,
@@ -121,6 +149,7 @@ def _entry(
         cap_rate_pct=cap,
         occupancy_pct=occ,
         source=source,  # type: ignore[arg-type]
+        triage_pod=_triage_pod(state, asset_type),  # type: ignore[arg-type]
     )
     return DealMemoryEntry(
         memo_id=memo_id,

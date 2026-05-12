@@ -27,6 +27,21 @@ Source = Literal["Broker", "Owner", "Lender", "Partner", "Referral"]
 
 Decision = Literal["pursue", "pass"]
 
+# Analyst triage pod: region x asset-class. Production routing would
+# dispatch each memo to the matching analyst pod's inbox; in the demo
+# it's a label that lets us show the routing decision.
+TriagePod = Literal[
+    "West / Industrial",
+    "West / Multifamily",
+    "West / Other",
+    "Central / Industrial",
+    "Central / Multifamily",
+    "Central / Other",
+    "East / Industrial",
+    "East / Multifamily",
+    "East / Other",
+]
+
 
 # ---- core data shapes ----
 
@@ -74,6 +89,19 @@ class DealContext(BaseModel):
     occupancy_pct: float = Field(description="Current occupancy, percent.")
     source: Source = Field(
         description="How the memo arrived: Broker, Owner, Lender, Partner, or Referral."
+    )
+    triage_pod: TriagePod = Field(
+        description=(
+            'Analyst triage label: "<Region> / <Class>". '
+            "Region by US geography: "
+            "West (CA, OR, WA, NV, AZ, UT, ID, MT, WY, CO, NM, AK, HI), "
+            "Central (TX, OK, KS, NE, SD, ND, MN, IA, MO, AR, LA, WI, IL, IN, MI, OH, KY, TN), "
+            "East (everything else). "
+            'Class collapses asset_type: "Industrial" iff Industrial, '
+            '"Multifamily" iff Multifamily, "Other" for everything else. '
+            'For multi-state portfolios pick the region of the largest asset; '
+            'when state is "Multiple" with no anchor, default to East.'
+        )
     )
 
 

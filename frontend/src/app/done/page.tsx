@@ -81,8 +81,15 @@ function Row({
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <div className="font-medium text-gray-900">
-                  {entry.deal.deal_name}
+                <div className="flex items-center gap-2">
+                  <div className="font-medium text-gray-900">
+                    {entry.deal.deal_name}
+                  </div>
+                  {entry.deal.triage_pod && (
+                    <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-700 ring-1 ring-inset ring-gray-200">
+                      {entry.deal.triage_pod}
+                    </span>
+                  )}
                 </div>
                 <div className="text-xs text-gray-500 mt-0.5">
                   {entry.deal.asset_type} · {entry.deal.location.city},{" "}
@@ -125,6 +132,9 @@ function ExpandedDetail({ entry }: { entry: DealMemoryEntry }) {
       <section>
         <SectionLabel>Deal facts</SectionLabel>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-2 text-sm mt-2">
+          {entry.deal.triage_pod && (
+            <Field label="Analyst triage" value={entry.deal.triage_pod} />
+          )}
           <Field label="Asset type" value={entry.deal.asset_type} />
           <Field
             label="Location"

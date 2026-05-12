@@ -90,6 +90,7 @@ def _format_card(reco: Recommendation) -> str:
 
 ### Deal context
 
+- **Analyst triage:** `{deal.triage_pod}`
 - **Property:** {deal.deal_name}
 - **Sponsor:** {deal.sponsor or "_unknown_"}
 - **Location:** {deal.location.city}, {deal.location.state} {deal.location.zipcode}
