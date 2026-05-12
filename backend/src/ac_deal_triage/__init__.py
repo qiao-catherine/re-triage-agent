@@ -1,1 +1,1 @@
-"""AC GTM take-home — real estate deal memo triage agent."""
+"""AC GTM take-home: real estate deal memo triage agent."""

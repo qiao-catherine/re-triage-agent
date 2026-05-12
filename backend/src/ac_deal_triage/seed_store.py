@@ -1,17 +1,15 @@
-"""One-shot script to seed the platform's runtime Store.
+"""Seed the platform's runtime Store via the HTTP API.
 
 Usage (with `langgraph dev` running on :2024):
 
     python -m ac_deal_triage.seed_store
 
-Why this exists: `langgraph_api`'s custom-app lifespan runs before the
-platform attaches its store to the app, so seeding from inside a custom
-route writes to a phantom InMemoryStore. The graph nodes write to the
-real platform store via `langgraph.config.get_store()`. To get them in
-sync, this script talks to the platform's HTTP store API from outside.
+The custom-app lifespan runs before the platform attaches its store, so
+seeding from inside a route writes to a phantom InMemoryStore. The graph
+nodes write to the real platform store via `langgraph.config.get_store()`;
+this script talks to the same store via the HTTP API.
 
-Idempotent: firm doc is only written if missing, historical deals are
-always upserted (cheap, lets schema changes propagate to seeded rows).
+All writes are unconditional upserts so schema changes propagate on rerun.
 """
 
 from __future__ import annotations
@@ -19,11 +17,23 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
+from dotenv import load_dotenv
 from langgraph_sdk import get_client
 
 from .schemas import FirmMemory
-from .seed import HISTORICAL_DEALS, INITIAL_FIRM_DOC
+from .seed import (
+    HISTORICAL_DEALS,
+    INITIAL_BROKERS,
+    INITIAL_FIRM_DOC,
+    INITIAL_SPONSORS,
+)
+
+# parents[3] is the repo root: backend/src/ac_deal_triage/seed_store.py
+_ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
+if _ROOT_ENV.exists():
+    load_dotenv(_ROOT_ENV)
 
 DEPLOYMENT_URL = os.getenv("DEPLOYMENT_URL", "http://localhost:2024")
 API_KEY = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
@@ -31,29 +41,38 @@ API_KEY = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
 FIRM_NAMESPACE = ("firm",)
 FIRM_KEY = "policies"
 DEALS_NAMESPACE = ("deals",)
+SPONSORS_NAMESPACE = ("sponsors",)
+BROKERS_NAMESPACE = ("brokers",)
 
 
 async def seed() -> None:
     client = get_client(url=DEPLOYMENT_URL, api_key=API_KEY)
 
-    # ---- firm doc -------------------------------------------------------
-    existing_firm = await client.store.get_item(FIRM_NAMESPACE, FIRM_KEY)
-    if existing_firm is None or not existing_firm.get("value"):
-        firm = FirmMemory(
-            doc=INITIAL_FIRM_DOC,
-            updated_at=datetime.now(tz=timezone.utc),
-        )
-        await client.store.put_item(
-            FIRM_NAMESPACE, FIRM_KEY, firm.model_dump(mode="json")
-        )
-        print(f"  + seeded firm doc ({len(INITIAL_FIRM_DOC)} chars)")
-    else:
-        print("  · firm doc already present, skipping")
+    firm = FirmMemory(
+        doc=INITIAL_FIRM_DOC,
+        updated_at=datetime.now(tz=timezone.utc),
+    )
+    await client.store.put_item(
+        FIRM_NAMESPACE, FIRM_KEY, firm.model_dump(mode="json")
+    )
+    print(f"  + upserted firm doc ({len(INITIAL_FIRM_DOC)} chars)")
 
-    # ---- historical deals ----------------------------------------------
-    # Upsert all seed entries — cheap, and lets schema evolutions (new
-    # @computed_fields like `final_decision`) propagate without manual
-    # backfill on subsequent runs.
+    for sponsor in INITIAL_SPONSORS:
+        await client.store.put_item(
+            SPONSORS_NAMESPACE,
+            sponsor.name,
+            sponsor.model_dump(mode="json"),
+        )
+    print(f"  + upserted {len(INITIAL_SPONSORS)} sponsors")
+
+    for broker in INITIAL_BROKERS:
+        await client.store.put_item(
+            BROKERS_NAMESPACE,
+            broker.name,
+            broker.model_dump(mode="json"),
+        )
+    print(f"  + upserted {len(INITIAL_BROKERS)} brokers")
+
     for entry in HISTORICAL_DEALS:
         await client.store.put_item(
             DEALS_NAMESPACE,

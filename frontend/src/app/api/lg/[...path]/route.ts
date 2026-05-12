@@ -1,15 +1,10 @@
 /**
  * Server-side proxy to the LangGraph deployment.
  *
- * Every frontend call now hits this origin instead of the deployment
- * directly. The server reads LANGSMITH_API_KEY from its environment
- * (server-only — NOT NEXT_PUBLIC_) and injects the x-api-key header
- * before forwarding. The key never reaches the browser.
+ * Reads LANGSMITH_API_KEY (server-only, NOT NEXT_PUBLIC_) and injects the
+ * x-api-key header before forwarding. The key never reaches the browser.
  *
- * Path mapping:
- *   /api/lg/threads/search        →  ${DEPLOYMENT_URL}/threads/search
- *   /api/lg/store/items/search    →  ${DEPLOYMENT_URL}/store/items/search
- *   /api/lg/<anything>/<at-all>   →  ${DEPLOYMENT_URL}/<anything>/<at-all>
+ * /api/lg/<path> forwards to ${DEPLOYMENT_URL}/<path>.
  */
 
 import { NextRequest, NextResponse } from "next/server";

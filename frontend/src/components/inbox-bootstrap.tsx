@@ -2,33 +2,28 @@
 
 /**
  * Auto-bootstrap the inbox connection on first load so the analyst doesn't
- * have to click through Settings. We point the agent-inbox internals at our
- * own server-side proxy (`/api/lg`) — the LangSmith API key lives only on
- * the server and is injected by the proxy, never persisted in the browser.
+ * have to click through Settings. Points the agent-inbox internals at our
+ * `/api/lg` proxy; the LangSmith API key stays server-side.
  *
- * Env vars (build-time, NEXT_PUBLIC_*, safe to ship to the bundle):
- *   NEXT_PUBLIC_GRAPH_ID         graph id (defaults to "deal_triage")
- *   NEXT_PUBLIC_INBOX_NAME       display name in the sidebar
+ * Build-time env (NEXT_PUBLIC_*, safe to ship to the bundle):
+ *   NEXT_PUBLIC_GRAPH_ID         graph id (default "deal_triage")
+ *   NEXT_PUBLIC_INBOX_NAME       sidebar display name
  *
- * The actual LangSmith API key lives in server-only env vars
- * (LANGSMITH_API_KEY) read by /api/lg/[...path]/route.ts.
+ * Server-only env (read by /api/lg/[...path]/route.ts): LANGSMITH_API_KEY.
  */
 
 import { useEffect } from "react";
 
 import { AGENT_INBOXES_LOCAL_STORAGE_KEY } from "@/components/agent-inbox/constants";
 
-const BOOTSTRAP_ID = "northbrook-default";
+const BOOTSTRAP_ID = "linwood-default";
 
 export function InboxBootstrap() {
   useEffect(() => {
     const graphId = process.env.NEXT_PUBLIC_GRAPH_ID || "deal_triage";
     const name = process.env.NEXT_PUBLIC_INBOX_NAME || "Deal Triage";
 
-    // Build an absolute URL — the langgraph-sdk's `new URL(path, apiUrl)`
-    // rejects a relative apiUrl. `window.location.origin` resolves to
-    // whatever the analyst is viewing (localhost:3000, vercel.app, etc.)
-    // so Next.js routes us back to the same origin's /api/lg proxy.
+    // Absolute URL: langgraph-sdk's `new URL(path, apiUrl)` rejects relative.
     const proxyUrl = `${window.location.origin}/api/lg`;
 
     try {

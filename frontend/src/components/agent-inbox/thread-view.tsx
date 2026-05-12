@@ -39,10 +39,20 @@ type DealContext = {
   source: string;
 };
 
+type EntityContext = {
+  name: string;
+  n_memos: number;
+  n_pursues: number;
+  pursue_rate_pct: number;
+  engagement_summary: string;
+};
+
 type Recommendation = {
   deal: DealContext;
   firm_memory_excerpt: string;
   similar_deals: SimilarDeal[];
+  sponsor_context?: EntityContext | null;
+  broker_context?: EntityContext | null;
   decision: Decision;
   rationale: string;
   key_risks: string[];
@@ -69,12 +79,12 @@ function fmtUsd(n: number): string {
 function formatLocation(loc: DealContext["location"]): string {
   const city = (loc?.city ?? "").trim();
   const state = (loc?.state ?? "").trim();
-  // Portfolios spanning multiple locations come through as "Multiple, Multiple"
-  // — render cleanly instead of repeating the placeholder.
+  // Portfolios spanning multiple locations come through as "Multiple, Multiple";
+  // render cleanly instead of repeating the placeholder.
   const isMultiple =
     city.toLowerCase() === "multiple" || state.toLowerCase() === "multiple";
   if (isMultiple) return "Multiple locations";
-  if (!city && !state) return "—";
+  if (!city && !state) return "-";
   const zip = (loc?.zipcode ?? "").trim();
   return [city, state, zip].filter(Boolean).join(", ");
 }
@@ -237,6 +247,49 @@ function SupportingEvidence({ excerpt }: { excerpt: string }) {
   );
 }
 
+function EntityContextBlock({
+  label,
+  ctx,
+}: {
+  label: string;
+  ctx: EntityContext;
+}) {
+  const tone = toneFor(ctx.pursue_rate_pct, ctx.n_memos);
+  return (
+    <div className="border-l-2 border-gray-200 pl-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="text-xs uppercase tracking-wide text-gray-500">
+          {label}
+        </div>
+        <span
+          className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-semibold ring-1 ring-inset tabular-nums ${tone}`}
+        >
+          {ctx.pursue_rate_pct.toFixed(0)}%
+        </span>
+      </div>
+      <div className="text-sm font-medium text-gray-900 mt-0.5">
+        {ctx.name}
+      </div>
+      <div className="text-xs text-gray-500 mt-0.5 tabular-nums">
+        {ctx.n_memos} memo{ctx.n_memos === 1 ? "" : "s"} ·{" "}
+        {ctx.n_pursues}/{ctx.n_memos} pursued
+      </div>
+      {ctx.engagement_summary && (
+        <div className="text-sm text-gray-700 mt-2 leading-relaxed">
+          {ctx.engagement_summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function toneFor(pct: number, nMemos: number): string {
+  if (nMemos < 2) return "bg-gray-100 text-gray-600 ring-gray-200";
+  if (pct <= 25) return "bg-rose-50 text-rose-700 ring-rose-200";
+  if (pct >= 75) return "bg-emerald-50 text-emerald-700 ring-emerald-200";
+  return "bg-amber-50 text-amber-700 ring-amber-200";
+}
+
 function SimilarDealsList({ deals }: { deals: SimilarDeal[] }) {
   if (deals.length === 0)
     return <div className="text-sm text-gray-500 italic">No analogs found</div>;
@@ -322,7 +375,7 @@ export function ThreadView<
       ? interrupt.action_request.action
       : `Thread: ${threadData.thread.thread_id.slice(0, 6)}…`;
 
-  // Read structured state — set by the triage agent's response_format.
+  // Read structured state set by the triage agent's response_format.
   const values = (threadData.thread.values ?? {}) as TriageValues;
   const reco = values.structured_response;
   const rawMemo = firstHumanMessageContent(values.messages);
@@ -379,6 +432,28 @@ export function ThreadView<
               {reco.firm_memory_excerpt && (
                 <CollapsibleCard title="Supporting evidence">
                   <SupportingEvidence excerpt={reco.firm_memory_excerpt} />
+                </CollapsibleCard>
+              )}
+
+              {(reco.sponsor_context || reco.broker_context) && (
+                <CollapsibleCard
+                  title="Past engagement on sponsor / broker"
+                  defaultOpen
+                >
+                  <div className="space-y-4">
+                    {reco.sponsor_context && (
+                      <EntityContextBlock
+                        label="Sponsor"
+                        ctx={reco.sponsor_context}
+                      />
+                    )}
+                    {reco.broker_context && (
+                      <EntityContextBlock
+                        label="Broker"
+                        ctx={reco.broker_context}
+                      />
+                    )}
+                  </div>
                 </CollapsibleCard>
               )}
 

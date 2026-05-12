@@ -1,15 +1,12 @@
-"""Thin wrapper over the LangGraph Store for our two namespaces.
+"""LangGraph Store helpers.
 
 Namespaces:
-  ("firm",)   — single key "policies" holding the FirmMemory doc
-  ("deals",)  — key=memo_id, holding DealMemoryEntry rows
+  ("firm",)     key="policies"  FirmMemory doc
+  ("sponsors",) key=name        SponsorRecord
+  ("brokers",)  key=name        BrokerRecord
+  ("deals",)    key=memo_id     DealMemoryEntry
 
-Everything async because that's what the deployment store exposes. Locally we
-get the same API via InMemoryStore — see `seed_store_if_empty`.
-
-Similarity is intentionally minimal (asset_type filter + recency sort) so
-reviewers can read it. Production swap-in is a vector index over the deal
-+ rationale text at the same seam.
+All async (deployment store is async; InMemoryStore mirrors the API).
 """
 
 from __future__ import annotations
@@ -19,25 +16,28 @@ from datetime import datetime, timezone
 from langgraph.store.base import BaseStore
 
 from .schemas import (
+    BrokerRecord,
     Decision,
     DealMemoryEntry,
     FirmMemory,
     SimilarDeal,
+    SponsorRecord,
 )
 from .seed import HISTORICAL_DEALS, INITIAL_FIRM_DOC
 
 FIRM_NS = ("firm",)
 FIRM_KEY = "policies"
 DEALS_NS = ("deals",)
+SPONSORS_NS = ("sponsors",)
+BROKERS_NS = ("brokers",)
 
 
-# ---- firm memory -----------------------------------------------------------
+# ---- firm memory ----
 
 
 async def read_firm_memory(store: BaseStore) -> FirmMemory:
     item = await store.aget(FIRM_NS, FIRM_KEY)
     if item is None:
-        # Lazy-seed on first read so the deployment doesn't need a setup script.
         firm = FirmMemory(
             doc=INITIAL_FIRM_DOC,
             updated_at=datetime.now(tz=timezone.utc),
@@ -48,12 +48,7 @@ async def read_firm_memory(store: BaseStore) -> FirmMemory:
 
 
 async def append_to_firm_memory(store: BaseStore, paragraph: str) -> FirmMemory:
-    """Append a paragraph to the firm doc.
-
-    Read-modify-write on a single store row. Not an append-only log; if you
-    need revision history, back it with a separate `("firm", "revisions")`
-    namespace keyed by timestamp.
-    """
+    """Read-modify-write a paragraph onto the firm doc."""
     current = await read_firm_memory(store)
     new_doc = current.doc.rstrip() + "\n\n" + paragraph.strip() + "\n"
     updated = FirmMemory(
@@ -64,16 +59,11 @@ async def append_to_firm_memory(store: BaseStore, paragraph: str) -> FirmMemory:
     return updated
 
 
-# ---- deal memory -----------------------------------------------------------
+# ---- deal memory ----
 
 
 async def add_deal_entry(store: BaseStore, entry: DealMemoryEntry) -> None:
-    """Upsert a deal entry. If `memo_id` already exists, the row is overwritten.
-
-    Each memo is triaged once in our flow, so this is fine. If a memo can be
-    re-triaged (e.g. analyst flips a decision later), use a compound key
-    `(memo_id, run_id)` instead.
-    """
+    """Upsert by memo_id. Each memo is triaged once in our flow."""
     await store.aput(DEALS_NS, entry.memo_id, entry.model_dump(mode="json"))
 
 
@@ -83,11 +73,10 @@ async def list_deal_entries(
     decision: Decision | None = None,
     limit: int = 200,
 ) -> list[DealMemoryEntry]:
-    """List deal entries, optionally filtered by the analyst's final pursue/pass.
+    """List deal entries, optionally filtered by analyst's pursue/pass.
 
-    `final_decision` is the @computed_field on DealMemoryEntry that captures
-    the analyst's effective call. It's materialized into the stored JSON at
-    write time, so we can push the filter to the store backend.
+    `final_decision` is a @computed_field materialized into stored JSON,
+    so the filter pushes down to the store backend.
     """
     filter_arg = {"final_decision": decision} if decision is not None else None
     items = await store.asearch(DEALS_NS, filter=filter_arg, limit=limit)
@@ -96,7 +85,46 @@ async def list_deal_entries(
     return entries
 
 
-# ---- similarity ------------------------------------------------------------
+# ---- sponsor + broker memory ----
+
+
+async def get_sponsor(store: BaseStore, name: str) -> SponsorRecord | None:
+    item = await store.aget(SPONSORS_NS, name)
+    if item is None:
+        return None
+    return SponsorRecord.model_validate(item.value)
+
+
+async def upsert_sponsor(store: BaseStore, record: SponsorRecord) -> None:
+    await store.aput(SPONSORS_NS, record.name, record.model_dump(mode="json"))
+
+
+async def list_sponsors(store: BaseStore, *, limit: int = 200) -> list[SponsorRecord]:
+    items = await store.asearch(SPONSORS_NS, limit=limit)
+    records = [SponsorRecord.model_validate(it.value) for it in items]
+    records.sort(key=lambda r: r.last_updated, reverse=True)
+    return records
+
+
+async def get_broker(store: BaseStore, name: str) -> BrokerRecord | None:
+    item = await store.aget(BROKERS_NS, name)
+    if item is None:
+        return None
+    return BrokerRecord.model_validate(item.value)
+
+
+async def upsert_broker(store: BaseStore, record: BrokerRecord) -> None:
+    await store.aput(BROKERS_NS, record.name, record.model_dump(mode="json"))
+
+
+async def list_brokers(store: BaseStore, *, limit: int = 200) -> list[BrokerRecord]:
+    items = await store.asearch(BROKERS_NS, limit=limit)
+    records = [BrokerRecord.model_validate(it.value) for it in items]
+    records.sort(key=lambda r: r.last_updated, reverse=True)
+    return records
+
+
+# ---- similarity ----
 
 
 async def find_similar_deals(
@@ -107,25 +135,20 @@ async def find_similar_deals(
     asking_price_usd: float,
     k: int = 4,
 ) -> list[SimilarDeal]:
-    """Tiered retrieval — take narrowest matches first, widen to fill up to k.
+    """Tiered retrieval, narrowest matches first, widening to fill up to k.
 
-    Tiers (most → least specific):
-      1. same asset_type + state + price within ±50%
-      2. same asset_type + state (drop price)
-      3. same asset_type (drop geo)
-      4. most recent overall (drop everything)
+    Tiers, most to least specific:
+      1. asset_type + state + price within +/-50%
+      2. asset_type + state
+      3. asset_type
+      4. most recent overall
 
-    For each tier we fetch matching deals sorted by recency, then append to
-    the result set, deduping by memo_id. Stop as soon as we have k.
-
-    Price is a range so we over-fetch and narrow in Python — the store
-    doesn't expose >= operators. Production swap-in (vector retrieval over
-    deal + rationale text) drops in at this seam.
+    Production swap-in (vector retrieval over deal + rationale text) drops
+    in at this seam.
     """
     PRICE_LOW = asking_price_usd * 0.5
     PRICE_HIGH = asking_price_usd * 1.5
-    # Over-fetch generously — the store returns items in insertion order, not by
-    # recency, so a tight limit silently drops the deals we want.
+    # Over-fetch: store returns insertion order, not recency.
     OVERFETCH = 200
 
     async def _entries(filter_arg: dict | None) -> list[DealMemoryEntry]:
@@ -164,6 +187,7 @@ async def find_similar_deals(
         SimilarDeal(
             memo_id=e.memo_id,
             deal_name=e.deal.deal_name,
+            sponsor=e.deal.sponsor,
             asset_type=e.deal.asset_type,
             asking_price_usd=e.deal.asking_price_usd,
             cap_rate_pct=e.deal.cap_rate_pct,
@@ -174,15 +198,11 @@ async def find_similar_deals(
     ]
 
 
-# ---- one-time seeding -----------------------------------------------------
+# ---- one-time seeding ----
 
 
 async def seed_store_if_empty(store: BaseStore) -> dict[str, int]:
-    """Idempotent: populate firm doc + historical deals if not already present.
-
-    Called from the routes app's lifespan hook, so a freshly-deployed
-    instance has data to demo against. Returns a small count summary.
-    """
+    """Idempotent: populate firm doc + historical deals if missing."""
     await read_firm_memory(store)  # lazy-seeds the firm doc if missing
 
     existing = await store.asearch(DEALS_NS, limit=1)

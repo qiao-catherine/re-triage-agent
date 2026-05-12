@@ -1,27 +1,19 @@
-"""Compiled graph — exported as `graph` for LangGraph Platform to pick up.
+"""Compiled graph; exported as `graph` for LangGraph Platform to pick up.
 
 Topology (linear):
 
-    START → triage → human_review → memory_writer → END
+    START -> triage -> human_review -> memory_writer -> END
 
-The `triage` node is a `create_agent` call used **directly** as a node — no
-wrapper. The agent reads `state["messages"]` (initial HumanMessage = the
-memo), calls its three tools, and writes `state["structured_response"]`
-(a Recommendation with both evidence and conclusion).
-
-The HITL pause happens inside `human_review_node` via `interrupt(...)`; resume
-arrives from agent-inbox through LangGraph's standard /runs/.../resume API.
-
-Compiled without checkpointer/store — LangGraph Platform (and `langgraph dev`
-locally) provide them at runtime.
+The triage node is `create_agent` used directly as a graph node (no wrapper)
+because `state_schema=TriageState` aligns its I/O with our state. HITL pause
+happens inside `human_review_node` via `interrupt(...)`; resume arrives from
+agent-inbox via LangGraph's /runs/.../resume API.
 """
 
 from __future__ import annotations
 
-# `langgraph_api` loads this file via spec.loader.exec_module (not as a
-# package member), so relative imports won't work — use absolute imports.
-# The `ac_deal_triage` package is on sys.path because langgraph.json's
-# `"dependencies": ["."]` triggers `pip install -e .` at boot.
+# langgraph_api loads this file via spec.loader.exec_module, not as a package
+# member, so relative imports won't work; use absolute imports.
 from langchain.agents import create_agent
 from langgraph.graph import END, START, StateGraph
 
@@ -32,9 +24,6 @@ from ac_deal_triage.prompts import TRIAGE_PROMPT
 from ac_deal_triage.schemas import Recommendation, TriageState
 from ac_deal_triage.tools import RESEARCH_TOOLS
 
-# The single triage agent — gathers evidence via tools, emits Recommendation.
-# `state_schema=TriageState` aligns the agent's I/O with our state, so it
-# can be added as a node directly with no wrapper function.
 triage_agent = create_agent(
     model=chat_model,
     tools=RESEARCH_TOOLS,

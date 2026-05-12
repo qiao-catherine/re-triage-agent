@@ -130,23 +130,41 @@ Three tabs in the sidebar:
 | **Firm memory** | The growing policy markdown                           | Platform Store `POST /store/items/get` for `("firm","policies")`       |
 
 
-To trigger a triage:
-
-1. Open LangGraph Studio at
-  `https://smith.langchain.com/studio/?baseUrl=http://localhost:2024` or use the [/thread/runs]("https://docs.langchain.com/langsmith/agent-server-api/thread-runs/list-runs") endpoint
-2. Send an input like:
+To trigger a triage, open LangGraph Studio at
+`https://smith.langchain.com/studio/?baseUrl=http://localhost:2024` (or
+your deployed URL) or hit the
+[/threads/runs](https://docs.langchain.com/langsmith/agent-server-api/thread-runs/list-runs)
+endpoint directly. Send an input like:
 
 ```json
 {
   "memo_id": "memo-001",
   "messages": [
-    {"role": "user", "content": "From: jordan.reese@cbre.com\nSubject: Cypress Trails Austin TX, 288-unit MF, $84M asking, 5.5% cap, 92% occupied. Halcyon Residential as sponsor."}
+    {"role": "user", "content": "From: kevin.osman@cbre.com\nTo: deals@linwood.capital\nSubject: New PLG industrial — Sonoran Bay Logistics, Phoenix AZ\n\nKevin here. Bringing you the latest from Phoenix Logistics Group:\n\n- 295,000 sqft shallow-bay industrial, two buildings, Goodyear AZ (Phoenix MSA)\n- 100% leased, blended WALT 4.8 yrs\n- Asking $62M, T-12 NOI ~$3.55M → 5.73% cap\n- PLG will deliver with $1.8M roof capex already escrowed\n\nLet me know if you want the full UW model."}
   ]
 }
-
 ```
 
-The graph runs to the `human_review` interrupt, then surfaces in the **For review** tab. Click into it, pick **Pursue** or **Pass**, optionally add a note, click **Submit**. The thread completes and the entry shows up in **Done**. If the note generalizes into a firm policy, **Firm memory** picks up a new paragraph on next refresh.
+This memo is the killer demo case — Phoenix Logistics Group is on the
+sponsor watchlist for cap-rate overstatement, and `find_similar_deals`
+will surface all three prior PLG deals (which all got passed for the
+same reason). Watch the agent cite the watchlist rule by name and flag
+the pattern in `key_risks`.
+
+The graph runs to the `human_review` interrupt, then surfaces in the
+**For review** tab. Click into it, pick **Pursue** or **Pass**,
+optionally add a note, click **Submit**. The thread completes and the
+entry shows up in **Done**. If the note generalizes into a firm policy,
+**Firm memory** picks up a new paragraph on next refresh.
+
+### Other example memos worth trying
+
+- **Halcyon Residential MF in Texas** — agent should weight the strong
+  track record from `find_similar_deals` and pursue
+- **Cornerstone Equity Partners deal under $80M** — agent should pass
+  per the watchlist (3 prior IC deaths)
+- **Tertiary industrial under $50M in Toledo / Wichita / etc.** — agent
+  should pass per the explicit hard rule
 
 In LangSmith, you can inspect that two feedback scores have been added onto the traces, recording the final analyst decision, as well as the computed reward (0 if agent decision does not align with human judgement, 1 otherwise)
 
@@ -160,14 +178,21 @@ langgraph deploy --name ac-deal-triage
 ```
 
 Adopts the platform's managed Postgres for both the checkpointer and the
-long-term Store. Run the seed script once against the deployed URL:
+long-term Store. Update `.env` with the deployed URL, then seed:
 
 ```bash
-DEPLOYMENT_URL=https://<your-deployment>.langgraph.app \
-  python -m ac_deal_triage.seed_store
+# In .env:
+#   DEPLOYMENT_URL=https://<your-deployment>.langgraph.app
+
+cd backend
+python -m ac_deal_triage.seed_store
 ```
 
+The seed script auto-loads `.env`, so no inline env vars needed.
+
 ### Frontend (Vercel)
+
+Should only be deployed after adding auth
 
 ```bash
 cd frontend

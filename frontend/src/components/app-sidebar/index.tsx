@@ -84,8 +84,7 @@ export function AppSidebarTrigger({
   );
 }
 
-// Primary navigation — the three views we care about (Review / Done / Firm memory).
-// Sits above the multi-inbox list to match how the analyst will actually use the app.
+// Primary navigation: Review / Done / Firm memory.
 function PrimaryNav() {
   const pathname = usePathname();
   const items = [

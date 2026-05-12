@@ -1,20 +1,8 @@
-"""Memory writer node — the loop that makes the system compound.
+"""Memory writer node.
 
-Three jobs per analyst action:
-  1. Append a DealMemoryEntry (always).
-  2. Write two LangSmith feedback rows to the original trace (always, when
-     `run_id` is available):
-        - "analyst_call"  → categorical "pursue"/"pass" (the analyst's effective call)
-        - "reward"        → numeric 0/1 (did agent's call align with analyst's)
-  3. If the analyst left a note, ask the LLM whether the note generalizes
-     into a firm policy. If yes, append a paragraph to firm memory.
-
-Feedback writes are best-effort — the deal entry is the source of truth, so
-its write must succeed even if LangSmith is unreachable.
-
-The firm-memory append is the visible "compounding" step: every analyst note
-that carries a generalizable lesson grows the doc that the research agent
-reads on every future call.
+On each analyst action: persist DealMemoryEntry, write LangSmith feedback,
+update sponsor/broker rows, and maybe append a paragraph to the firm doc.
+The deal entry write is the source of truth; everything else is best-effort.
 """
 
 from __future__ import annotations
@@ -24,6 +12,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.config import get_store
@@ -35,20 +24,29 @@ from .. import store as store_helpers
 from ..models import chat_model
 from ..schemas import (
     AnalystAction,
+    BrokerRecord,
     DealContext,
     DealMemoryEntry,
     Recommendation,
+    SponsorRecord,
     TriageState,
     compute_reward,
 )
 
 log = logging.getLogger(__name__)
 
-# Shared LangSmith client. Reads LANGSMITH_API_KEY from env; no-ops if unset.
 _ls = LangSmithClient()
 
 
-# ---- rule extraction ------------------------------------------------------
+# ---- policy-bucket rule extraction ----
+
+FirmSection = Literal[
+    "Fund mandate",
+    "Asset class preferences",
+    "Hard rules",
+    "Soft preferences",
+]
+
 
 _RULE_EXTRACTION_PROMPT = """\
 You maintain a real estate fund's investment-policy document.
@@ -56,31 +54,43 @@ You maintain a real estate fund's investment-policy document.
 Given:
 - a deal (DealContext)
 - the agent's recommendation (pursue/pass + rationale)
-- the analyst's decision (accepted/rejected) and free-text note
+- the analyst's decision (pursue/pass) and free-text note
 
-Decide whether the note implies a *generalizable* lesson worth adding to the
-firm policy doc. Generalizable means it would apply to future deals beyond
-this specific property — a new rule, a refined preference, an exception to
-an existing rule, or a softening/hardening of a threshold.
+Decide whether the note implies a *generalizable* lesson about the firm's
+**policy**: a new mandate clause, hard rule, asset-class preference, or
+soft preference that would apply to future deals.
 
-When `append` is true, write `paragraph` in policy-doc voice: third person,
-declarative, one short markdown paragraph. Reference the triggering deal
-name in parentheses with today's date.
+Lessons about a *specific sponsor* (e.g. "PLG overstated cap again") or a
+*specific broker* (e.g. "Vantage RE keeps shopping junk") are NOT policy
+updates; they are entity-level signals tracked separately as sponsor/broker
+rows. Set `append=false` for those.
 
-Be conservative — set `append` to false if the note is just an idiosyncratic
-comment about this one deal.
+Append only when the lesson is broadly applicable across deals and entities.
+
+When `append` is true, also pick a `section`:
+  - "Fund mandate":            vehicle / check-size / geography / hold-period
+  - "Asset class preferences": preferences within an asset class
+  - "Hard rules":              new threshold-based hard rules
+  - "Soft preferences":        anything else that's preference-level
+
+Write `paragraph` in policy-doc voice: third person, declarative, one short
+markdown paragraph. Reference the triggering deal name in parentheses.
+Be conservative; set `append=false` when in doubt.
 """
 
 
 class _RuleExtraction(BaseModel):
-    """Structured output for the rule-extraction LLM call."""
+    """Structured output for the policy-rule extraction LLM call."""
 
-    append: bool = Field(description="Should we append a policy paragraph?")
+    append: bool = Field(description="Does this note generalize into a firm policy update?")
+    section: FirmSection | None = Field(
+        default=None,
+        description="Which H2 section the paragraph belongs under. Null when append=false.",
+    )
     paragraph: str = Field(
         default="",
         description=(
-            "If append=true, the paragraph to append (markdown, policy-doc voice). "
-            "Empty string when append=false."
+            "If append=true, the paragraph to insert. Empty string when append=false."
         ),
     )
 
@@ -88,13 +98,12 @@ class _RuleExtraction(BaseModel):
 _rule_extractor = chat_model.with_structured_output(_RuleExtraction)
 
 
-async def _maybe_extract_rule(
+async def _maybe_extract_policy_update(
     deal: DealContext,
     reco: Recommendation,
     action: AnalystAction,
-) -> str | None:
+) -> _RuleExtraction | None:
     if not action.note:
-        log.info("rule extraction skipped: no analyst note")
         return None
     payload = {
         "deal": deal.model_dump(mode="json"),
@@ -107,18 +116,199 @@ async def _maybe_extract_rule(
             HumanMessage(content=json.dumps(payload)),
         ]
     )
-    log.info(
-        "rule extraction: append=%s paragraph_len=%d",
-        result.append,
-        len(result.paragraph or ""),
-    )
-    if not result.append:
+    if not result.append or not result.section or not result.paragraph.strip():
         return None
-    para = result.paragraph.strip()
-    return para or None
+    return result
 
 
-# ---- LangSmith feedback ----------------------------------------------------
+async def _apply_policy_update(store, payload: _RuleExtraction) -> None:
+    assert payload.section is not None
+    decorated = f"**{payload.section}**: {payload.paragraph.strip()}"
+    await store_helpers.append_to_firm_memory(store, decorated)
+
+
+async def _handle_policy_update(
+    store,
+    deal: DealContext,
+    reco: Recommendation,
+    action: AnalystAction,
+) -> None:
+    try:
+        extracted = await _maybe_extract_policy_update(deal, reco, action)
+        if extracted is not None:
+            await _apply_policy_update(store, extracted)
+    except Exception as e:  # noqa: BLE001
+        log.warning("policy update failed: %s", e)
+
+
+# ---- engagement updates ----
+#
+# Counts (n_memos, n_pursues) are deterministic. engagement_summary is
+# rewritten per memo by an LLM that reads the current summary plus the
+# new deal and analyst note. The LLM may no-op on routine deals.
+
+
+class _SummaryUpdate(BaseModel):
+    """Structured output for the engagement-summary update LLM call."""
+
+    summary: str = Field(
+        description=(
+            "Updated running summary (2-4 sentences). If the new deal does "
+            "not reveal or reinforce a pattern, return the current summary "
+            "unchanged. Return the summary text directly, no preamble."
+        )
+    )
+
+
+_summary_updater = chat_model.with_structured_output(_SummaryUpdate)
+
+
+_ENGAGEMENT_SUMMARY_PROMPT_TEMPLATE = """\
+You maintain a short running summary of how a real-estate fund has engaged \
+with one specific {entity_type} ({entity_name}). The summary captures \
+patterns the firm's analysts have observed (sponsor cap-rate behavior, \
+sponsor bench quality, broker deal quality, IC outcomes) so the triage \
+agent can apply that pattern to the next deal.
+
+Current summary:
+{current_summary_block}
+
+New deal just reviewed:
+- Deal: {deal_name}, {state}, {price}, {cap_rate}% cap
+- Agent recommended: {agent_decision}
+- Analyst's call: {analyst_decision}
+- Analyst note: {note_block}
+
+Decide what to do:
+1. If the new deal reveals new pattern info OR strongly reinforces an \
+   existing pattern (especially when the analyst left a note), update \
+   the summary to reflect it. Keep it tight (2-4 sentences total).
+2. If the deal is routine (no analyst note, decisions consistent with the \
+   prior pattern, no new info), return the current summary unchanged.
+3. If the analyst note contradicts the prior summary, replace the relevant \
+   clause; don't keep stale claims.
+
+Return only the new summary text, no preamble.
+"""
+
+
+def _format_summary_prompt(
+    *,
+    entity_type: str,
+    entity_name: str,
+    current_summary: str,
+    deal: DealContext,
+    agent_decision: str,
+    analyst_decision: str,
+    note: str | None,
+) -> str:
+    price = f"${deal.asking_price_usd:,.0f}"
+    return _ENGAGEMENT_SUMMARY_PROMPT_TEMPLATE.format(
+        entity_type=entity_type,
+        entity_name=entity_name,
+        current_summary_block=current_summary.strip()
+        if current_summary.strip()
+        else "(none yet; this is the first deal involving this entity)",
+        deal_name=deal.deal_name,
+        state=deal.location.state,
+        price=price,
+        cap_rate=f"{deal.cap_rate_pct:.2f}",
+        agent_decision=agent_decision,
+        analyst_decision=analyst_decision,
+        note_block=note.strip() if note and note.strip() else "(no note left)",
+    )
+
+
+async def _update_engagement_summary(
+    *,
+    entity_type: str,
+    entity_name: str,
+    current_summary: str,
+    deal: DealContext,
+    reco: Recommendation,
+    action: AnalystAction,
+) -> str:
+    """LLM call. On failure returns `current_summary` unchanged."""
+    prompt = _format_summary_prompt(
+        entity_type=entity_type,
+        entity_name=entity_name,
+        current_summary=current_summary,
+        deal=deal,
+        agent_decision=reco.decision,
+        analyst_decision=action.decision,
+        note=action.note,
+    )
+    try:
+        result: _SummaryUpdate = await _summary_updater.ainvoke(
+            [HumanMessage(content=prompt)]
+        )
+        new_summary = result.summary.strip()
+        return new_summary or current_summary
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "engagement summary update failed for %s %s: %s",
+            entity_type,
+            entity_name,
+            e,
+        )
+        return current_summary
+
+
+async def _update_sponsor_engagement(
+    store,
+    name: str,
+    deal: DealContext,
+    reco: Recommendation,
+    action: AnalystAction,
+) -> None:
+    existing = await store_helpers.get_sponsor(store, name)
+    new_summary = await _update_engagement_summary(
+        entity_type="sponsor",
+        entity_name=name,
+        current_summary=existing.engagement_summary if existing else "",
+        deal=deal,
+        reco=reco,
+        action=action,
+    )
+    pursued = action.decision == "pursue"
+    record = SponsorRecord(
+        name=name,
+        n_memos=(existing.n_memos + 1) if existing else 1,
+        n_pursues=(existing.n_pursues + (1 if pursued else 0)) if existing else (1 if pursued else 0),
+        engagement_summary=new_summary,
+        last_updated=datetime.now(tz=timezone.utc),
+    )
+    await store_helpers.upsert_sponsor(store, record)
+
+
+async def _update_broker_engagement(
+    store,
+    name: str,
+    deal: DealContext,
+    reco: Recommendation,
+    action: AnalystAction,
+) -> None:
+    existing = await store_helpers.get_broker(store, name)
+    new_summary = await _update_engagement_summary(
+        entity_type="broker",
+        entity_name=name,
+        current_summary=existing.engagement_summary if existing else "",
+        deal=deal,
+        reco=reco,
+        action=action,
+    )
+    pursued = action.decision == "pursue"
+    record = BrokerRecord(
+        name=name,
+        n_memos=(existing.n_memos + 1) if existing else 1,
+        n_pursues=(existing.n_pursues + (1 if pursued else 0)) if existing else (1 if pursued else 0),
+        engagement_summary=new_summary,
+        last_updated=datetime.now(tz=timezone.utc),
+    )
+    await store_helpers.upsert_broker(store, record)
+
+
+# ---- LangSmith feedback ----
 
 
 async def _write_feedback(
@@ -126,45 +316,38 @@ async def _write_feedback(
     reco: Recommendation,
     action: AnalystAction,
 ) -> None:
-    """Two feedback rows on the trace root — categorical + numeric.
+    """Two feedback rows on the trace root (categorical + numeric).
 
-    `analyst_call` carries the analyst's effective pursue/pass and any note
-    text (eval datasets / classification metrics).
-    `reward` carries the 0/1 alignment signal (RL reward shaping / regression
-    metrics).
-
-    Best-effort — failures are logged, never raised. The deal entry write is
-    the source of truth. Uses the async `acreate_feedback` so the LangSmith
-    HTTP call doesn't block the asyncio event loop.
+    Sync LangSmith client wrapped in asyncio.to_thread; the two writes
+    fire concurrently. Failures are logged, never raised.
     """
-    call = action.decision  # analyst's explicit pursue/pass
+    call = action.decision
     reward = compute_reward(reco.decision, action)
 
     try:
-        # langsmith.Client only has sync `create_feedback`; offload to a
-        # thread so the asyncio event loop isn't blocked on the HTTPS call.
-        await asyncio.to_thread(
-            _ls.create_feedback,
-            run_id=run_id,
-            key="analyst_call",
-            value=call,
-            comment=action.note,
-        )
-        await asyncio.to_thread(
-            _ls.create_feedback,
-            run_id=run_id,
-            key="reward",
-            score=float(reward),
+        await asyncio.gather(
+            asyncio.to_thread(
+                _ls.create_feedback,
+                run_id=run_id,
+                key="analyst_call",
+                value=call,
+                comment=action.note,
+            ),
+            asyncio.to_thread(
+                _ls.create_feedback,
+                run_id=run_id,
+                key="reward",
+                score=float(reward),
+            ),
         )
     except Exception as e:  # noqa: BLE001
         log.warning("LangSmith feedback write failed for run %s: %s", run_id, e)
 
 
-# ---- node -----------------------------------------------------------------
+# ---- node ----
 
 
 def _raw_memo_from_messages(state: TriageState) -> str:
-    """Pull the original memo text out of the first HumanMessage in state."""
     messages = state.get("messages") or []
     if not messages:
         return ""
@@ -181,19 +364,13 @@ async def memory_writer_node(state: TriageState) -> dict:
 
     store = get_store()
 
-    # Fetch the LangSmith trace root at the point of use. The trace exists
-    # for the whole graph invocation, so fetching it here yields the same
-    # UUID as fetching it earlier — but state stays cleaner.
     rt = get_current_run_tree()
     run_id = str(rt.trace_id) if rt else None
 
-    # 1. Deal entry .
     memo_id = state.get("memo_id")
     if not memo_id:
         memo_id = f"memo-{uuid.uuid4().hex[:8]}"
-        log.warning(
-            "memory_writer_node: state had no memo_id; generated %s", memo_id
-        )
+        log.warning("memory_writer_node: state had no memo_id; generated %s", memo_id)
 
     entry = DealMemoryEntry(
         memo_id=memo_id,
@@ -206,13 +383,24 @@ async def memory_writer_node(state: TriageState) -> dict:
     )
     await store_helpers.add_deal_entry(store, entry)
 
-    # 2. LangSmith feedback 
+    # Fan out: independent tasks, separate store namespaces / remote service.
+    # return_exceptions keeps a sibling failure from cancelling the rest.
+    tasks: list = []
     if run_id is not None:
-        await _write_feedback(run_id, reco, action)
+        tasks.append(_write_feedback(run_id, reco, action))
+    if reco.deal.sponsor:
+        tasks.append(
+            _update_sponsor_engagement(store, reco.deal.sponsor, reco.deal, reco, action)
+        )
+    if reco.deal.broker:
+        tasks.append(
+            _update_broker_engagement(store, reco.deal.broker, reco.deal, reco, action)
+        )
+    tasks.append(_handle_policy_update(store, reco.deal, reco, action))
 
-    # 3. Firm-memory append if the analyst's note generalizes into policy.
-    paragraph = await _maybe_extract_rule(reco.deal, reco, action)
-    if paragraph:
-        await store_helpers.append_to_firm_memory(store, paragraph)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, Exception):
+            log.warning("memory_writer fan-out task raised: %s", r)
 
     return {}

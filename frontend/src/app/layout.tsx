@@ -16,8 +16,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Northbrook Deal Triage",
-  description: "Forked from langchain-ai/agent-inbox for the AC GTM take-home demo.",
+  title: "Linwood Capital: Deal Triage",
+  description: "AC GTM take-home: deal-triage demo for Linwood Capital (scenario 2).",
 };
 
 export default function RootLayout({

@@ -1,8 +1,4 @@
-"""Typed schemas for the deal triage graph.
-
-Everything that crosses a node boundary, gets persisted, or shows up in the
-HumanInterrupt payload is defined here. Keep this file dependency-light.
-"""
+"""Typed schemas for the deal triage graph."""
 
 from __future__ import annotations
 
@@ -14,7 +10,7 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field, computed_field
 
 
-# ---- enums ------------------------------------------------------------------
+# ---- enums ----
 
 AssetType = Literal[
     "Multifamily",
@@ -32,31 +28,53 @@ Source = Literal["Broker", "Owner", "Lender", "Partner", "Referral"]
 Decision = Literal["pursue", "pass"]
 
 
-# ---- core data shapes -------------------------------------------------------
+# ---- core data shapes ----
 
 
 class Location(BaseModel):
-    city: str
-    state: str
-    zipcode: str
+    city: str = Field(description='City. "Multiple" for portfolios spanning cities.')
+    state: str = Field(description='Two-letter US state code (e.g. "TX"). "Multiple" for portfolios.')
+    zipcode: str = Field(description="Five-digit US zipcode; empty string if not in the memo.")
 
 
 class DealContext(BaseModel):
     """Extracted from the raw memo by the research agent.
 
-    Field order is the order it renders in the agent-inbox card — keep the
-    money fields together so the analyst can scan the financials in one row.
+    Field order matches the agent-inbox card render order.
     """
 
-    deal_name: str = Field(description="Property or deal name; identifies the opportunity.")
-    location: Location
-    asset_type: AssetType
-    size_sqft: int = Field(description="Total rentable square footage.")
-    asking_price_usd: float = Field(description="Main valuation anchor.")
-    current_noi_usd: float = Field(description="Current income basis.")
-    cap_rate_pct: float = Field(description="Quick pricing / yield metric.")
-    occupancy_pct: float = Field(description="Stabilization and leasing risk indicator.")
-    source: Source = Field(description="How the memo arrived at the firm.")
+    deal_name: str = Field(description="Property or deal name (verbatim).")
+    sponsor: str | None = Field(
+        default=None,
+        description="Sponsor / GP name (verbatim). Null if not named in the memo.",
+    )
+    broker: str | None = Field(
+        default=None,
+        description=(
+            "Broker or brokerage firm name (verbatim, e.g. 'CBRE', 'JLL', "
+            "'Newmark'). Null if the memo doesn't name a broker."
+        ),
+    )
+    location: Location = Field(
+        description=(
+            "City, state, and zipcode. Infer state from city when unambiguous. "
+            'For multi-asset portfolios, set city and state to "Multiple".'
+        )
+    )
+    asset_type: AssetType = Field(
+        description=(
+            "Closest matching AssetType literal. Default to Other only if none "
+            "of the named classes fit."
+        )
+    )
+    size_sqft: int = Field(description="Total rentable square feet.")
+    asking_price_usd: float = Field(description="Asking / target acquisition price, USD.")
+    current_noi_usd: float = Field(description="T-12 or in-place NOI, USD.")
+    cap_rate_pct: float = Field(description="Asking cap rate, percent.")
+    occupancy_pct: float = Field(description="Current occupancy, percent.")
+    source: Source = Field(
+        description="How the memo arrived: Broker, Owner, Lender, Partner, or Referral."
+    )
 
 
 class SimilarDeal(BaseModel):
@@ -64,6 +82,7 @@ class SimilarDeal(BaseModel):
 
     memo_id: str
     deal_name: str
+    sponsor: str | None = None
     asset_type: AssetType
     asking_price_usd: float
     cap_rate_pct: float
@@ -71,22 +90,35 @@ class SimilarDeal(BaseModel):
     note: str | None = None
 
 
+class EntityContext(BaseModel):
+    """Slim snapshot of a SponsorRecord/BrokerRecord for the agent's output.
+
+    Carries the firm's record on a named sponsor or broker through state and
+    out to the analyst inbox. The agent copies the lookup_sponsor /
+    lookup_broker tool output verbatim into this shape.
+    """
+
+    name: str
+    n_memos: int
+    n_pursues: int
+    pursue_rate_pct: float
+    engagement_summary: str
+
+
 class Recommendation(BaseModel):
     """The triage agent's complete structured output.
 
-    Combines evidence (deal extraction, firm-memory excerpt, similar past
-    deals — gathered via the three tools) and conclusion (decision, rationale,
-    key risks). Designed to be `response_format=` on a single create_agent
-    call so the agent IS the graph node — no wrapper needed.
+    Used as `response_format=` on a single create_agent call so the agent IS
+    the graph node; no wrapper needed.
     """
 
-    # ---- evidence (gathered via tools) -----------------------------------
+    # evidence
     deal: DealContext = Field(
         description="Structured fields extracted from the raw memo."
     )
     firm_memory_excerpt: str = Field(
         description=(
-            "Verbatim excerpt of the firm policy doc — the sections that apply "
+            "Verbatim excerpt of the firm policy doc, the sections that apply "
             "to this deal. Quote rule names exactly; do not paraphrase."
         )
     )
@@ -94,8 +126,23 @@ class Recommendation(BaseModel):
         default_factory=list,
         description="Up to 4 precedents from find_similar_deals.",
     )
+    sponsor_context: EntityContext | None = Field(
+        default=None,
+        description=(
+            "Verbatim copy of the lookup_sponsor tool output (slimmed to "
+            "EntityContext shape). Null if the deal does not name a sponsor "
+            "or the firm has no record on this sponsor."
+        ),
+    )
+    broker_context: EntityContext | None = Field(
+        default=None,
+        description=(
+            "Verbatim copy of the lookup_broker tool output. Null if the "
+            "deal does not name a broker or the firm has no record."
+        ),
+    )
 
-    # ---- conclusion (synthesized) ----------------------------------------
+    # conclusion
     decision: Decision = Field(description='"pursue" or "pass".')
     rationale: str = Field(
         description=(
@@ -111,10 +158,9 @@ class Recommendation(BaseModel):
 
 
 class AnalystAction(BaseModel):
-    """The analyst's pursue/pass call on the deal, with an optional note.
+    """The analyst's pursue/pass call, with an optional note.
 
-    Posted back from agent-inbox via the interrupt resume. `decision` is the
-    analyst's *own* call (not relative to the agent) — same domain as
+    Posted back from agent-inbox via the interrupt resume. Same domain as
     `agent_recommendation.decision`.
     """
 
@@ -123,30 +169,62 @@ class AnalystAction(BaseModel):
 
 
 def compute_reward(agent_decision: Decision, action: AnalystAction) -> int:
-    """Reward = 1 iff the agent's pursue/pass matched the analyst's pursue/pass.
-
-    Single source of truth for reward computation. Used by both the
-    DealMemoryEntry @computed_field and the LangSmith feedback writer.
-    """
+    """1 iff the agent's pursue/pass matched the analyst's."""
     return int(agent_decision == action.decision)
 
 
 def opposite(decision: Decision) -> Decision:
-    """The other pursue/pass — useful when mapping agent-inbox 'response'
-    (analyst disagrees) to the analyst's explicit call."""
     return "pass" if decision == "pursue" else "pursue"
 
 
-# ---- persisted memory shapes -----------------------------------------------
+# ---- persisted memory shapes ----
+
+
+class SponsorRecord(BaseModel):
+    """Sponsor row. Stored at namespace=("sponsors",), key=sponsor name.
+
+    Counts (n_memos, n_pursues) update deterministically per memo;
+    engagement_summary is rewritten by an LLM per memo.
+    """
+
+    name: str
+    n_memos: int = Field(default=0, description="Total memos involving this sponsor.")
+    n_pursues: int = Field(
+        default=0, description="How many of those memos the analyst pursued."
+    )
+    engagement_summary: str = Field(
+        default="",
+        description="Short running prose (2-4 sentences). LLM-maintained per memo.",
+    )
+    last_updated: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def pursue_rate_pct(self) -> float:
+        if self.n_memos == 0:
+            return 0.0
+        return round(100.0 * self.n_pursues / self.n_memos, 1)
+
+
+class BrokerRecord(BaseModel):
+    """Broker row. Same shape as SponsorRecord, separate class for future fields."""
+
+    name: str
+    n_memos: int = 0
+    n_pursues: int = 0
+    engagement_summary: str = ""
+    last_updated: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def pursue_rate_pct(self) -> float:
+        if self.n_memos == 0:
+            return 0.0
+        return round(100.0 * self.n_pursues / self.n_memos, 1)
 
 
 class FirmMemory(BaseModel):
-    """One growing markdown document. Stored at namespace=("firm",), key="policies".
-
-    Intentionally minimal — `updated_at` is enough to convey "this doc is alive
-    and growing" for the UI. No revision counter; if audit history is ever
-    needed, back it with an actual append-only log keyed by revision id.
-    """
+    """Firm policy doc. Stored at namespace=("firm",), key="policies"."""
 
     doc: str
     updated_at: datetime
@@ -162,57 +240,30 @@ class DealMemoryEntry(BaseModel):
     analyst_action: AnalystAction
     run_id: str | None = Field(
         default=None,
-        description=(
-            "LangSmith trace root run UUID — joins this entry to the agent run "
-            "that produced the recommendation. Used to write analyst feedback "
-            "back onto the original trace via `Client.create_feedback`."
-        ),
+        description="LangSmith trace root run UUID; joins this entry to the agent run.",
     )
     created_at: datetime
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def final_decision(self) -> Decision:
-        """The analyst's pursue/pass call — what happens to the deal.
-
-        Now trivially equals `analyst_action.decision` (since AnalystAction
-        carries pursue/pass directly), but exposed as a computed field for
-        backward compatibility with store filters keyed on `final_decision`.
-        """
+        """Analyst's pursue/pass call. Exposed as computed field for store filters."""
         return self.analyst_action.decision
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def reward(self) -> int:
-        """1 iff agent's pursue/pass matched the analyst's pursue/pass.
-
-        Derived — never accepted as input, never stored as a separate
-        source of truth. Always consistent with `agent_recommendation`
-        and `analyst_action` by construction.
-        """
         return compute_reward(self.agent_recommendation.decision, self.analyst_action)
 
 
-# ---- graph state ------------------------------------------------------------
+# ---- graph state ----
 
 
 class TriageState(TypedDict, total=False):
-    """State threaded through the LangGraph graph.
+    """State threaded through the graph.
 
-    The triage agent is added directly as a node (no wrapper), so state has
-    the agent's natural I/O shape:
-      - `messages` — input HumanMessage(raw_memo) lands here
-      - `structured_response` — the agent's parsed Recommendation lands here
-
-    Other notes:
-      - `reward` is NOT in state — it's a @computed_field on DealMemoryEntry,
-        derived from agent_recommendation + analyst_action at write time.
-      - `run_id` (LangSmith trace root) is NOT threaded through state either —
-        memory_writer_node fetches it at the point of use via
-        `get_current_run_tree()`. The trace root exists for the entire graph
-        invocation, so fetching it later gives the same UUID.
-      - `raw_memo` was dropped — memory_writer extracts it from
-        `messages[0].content` when writing DealMemoryEntry.
+    The triage agent is a graph node directly, so state uses the agent's
+    natural I/O shape: `messages` in, `structured_response` out.
     """
 
     messages: Annotated[list[AnyMessage], add_messages]
